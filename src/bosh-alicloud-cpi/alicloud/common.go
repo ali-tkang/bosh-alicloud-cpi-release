@@ -81,6 +81,15 @@ const (
 	SpotAsPriceGo      = SpotStrategyType("SpotAsPriceGo")
 )
 
+type PrivatePoolMatchCriteriaType string
+
+// Constants of PrivatePoolMatchCriteriaType
+const (
+	PrivatePoolOpen   = PrivatePoolMatchCriteriaType("Open")
+	PrivatePoolTarget = PrivatePoolMatchCriteriaType("Target")
+	PrivatePoolNone   = PrivatePoolMatchCriteriaType("None")
+)
+
 type ImageFormatType string
 
 const (

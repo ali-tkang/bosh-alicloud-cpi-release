@@ -4,6 +4,8 @@
 package action
 
 import (
+	"encoding/json"
+
 	"bosh-alicloud-cpi/mock"
 
 	. "github.com/onsi/ginkgo"
@@ -372,6 +374,127 @@ var _ = Describe("create_vm", func() {
 			r := caller.Run(buildCreateVM("ecs.c9i.xlarge"))
 			Expect(r.GetError()).To(HaveOccurred())
 			Expect(mockContext.Instances).To(HaveLen(before), "the created instance should have been deleted")
+		})
+	})
+
+	Context("private pool options", func() {
+		// validateFor runs the validation against a cloud_properties fragment, so it
+		// covers the json schema and the validation rules together.
+		validateFor := func(cloudProps string) error {
+			var props InstanceProps
+			Expect(json.Unmarshal([]byte(cloudProps), &props)).To(Succeed())
+			return validatePrivatePoolProps(props)
+		}
+
+		It("accepts Open without an id", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "Open"}}`)).To(Succeed())
+		})
+
+		It("accepts Target with an id", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "Target", "id": "eap-bp67acfmxazb4"}}`)).To(Succeed())
+		})
+
+		It("accepts None", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "None"}}`)).To(Succeed())
+		})
+
+		It("accepts cloud_properties without private_pool_options", func() {
+			Expect(validateFor(`{"instance_type": "ecs.n4.large"}`)).To(Succeed())
+		})
+
+		It("rejects Target without an id", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "Target"}}`)).To(
+				MatchError(ContainSubstring("id is required")))
+		})
+
+		It("rejects an id on Open, which ignores it", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "Open", "id": "eap-bp67acfmxazb4"}}`)).To(
+				MatchError(ContainSubstring("only support 'Target'")))
+		})
+
+		It("rejects an id without a match_criteria", func() {
+			Expect(validateFor(`{"private_pool_options": {"id": "eap-bp67acfmxazb4"}}`)).To(
+				MatchError(ContainSubstring("requires match_criteria 'Target'")))
+		})
+
+		It("rejects an unknown match_criteria", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "open"}}`)).To(
+				MatchError(ContainSubstring("is not in array")))
+		})
+
+		It("rejects a private pool on a spot instance, which ECS does not support", func() {
+			Expect(validateFor(`{
+				"private_pool_options": {"match_criteria": "Open"},
+				"spot_strategy": "SpotAsPriceGo"
+			}`)).To(MatchError(ContainSubstring("does not support the spot strategy")))
+		})
+
+		It("allows None on a spot instance", func() {
+			Expect(validateFor(`{
+				"private_pool_options": {"match_criteria": "None"},
+				"spot_strategy": "SpotAsPriceGo"
+			}`)).To(Succeed())
+		})
+
+		Context("the query create_vm sends to ECS", func() {
+			buildCreateVM := func(privatePoolOptions string) []byte {
+				return mock.NewBuilder(`{
+					"method": "create_vm",
+					"arguments": [
+						"243bf6fc-8f26-4aef-b40f-824763fcdfa2",
+						"m-2zehhdtfg22hq46reabf",
+						{
+							"instance_type": "ecs.n4.xlarge"` + privatePoolOptions + `
+						},
+						{
+							"cf1": {
+								"type": "manual",
+								"ip": "10.0.16.109",
+								"netmask": "255.255.240.0",
+								"cloud_properties": {
+									"security_group_ids": ["sg-2ze2ct08gslmnwyv8c1k"],
+									"vswitch_id": "vpc-2ze3owai4kbkv2yf6nivg"
+								},
+								"default": ["dns", "gateway"],
+								"dns": ["10.0.16.2"],
+								"gateway": "10.0.16.1"
+							}
+						},
+						[],
+						{ "bosh": { "group": "g" } }
+					],
+					"context": { "director_uuid": "879e2edf-a9c4-4d2e-be8c-6b23dc530008" }
+				}`).ToBytes()
+			}
+
+			It("carries the documented ECS query keys", func() {
+				r := caller.Run(buildCreateVM(`,
+					"private_pool_options": {"match_criteria": "Target", "id": "eap-bp67acfmxazb4"}`))
+				Expect(r.GetError()).NotTo(HaveOccurred())
+
+				args := *mockContext.CreateInstanceArgs
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.MatchCriteria", "Target"))
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.Id", "eap-bp67acfmxazb4"))
+			})
+
+			It("omits the id on Open", func() {
+				r := caller.Run(buildCreateVM(`,
+					"private_pool_options": {"match_criteria": "Open"}`))
+				Expect(r.GetError()).NotTo(HaveOccurred())
+
+				args := *mockContext.CreateInstanceArgs
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.MatchCriteria", "Open"))
+				Expect(args).NotTo(HaveKey("PrivatePoolOptions.Id"))
+			})
+
+			It("omits both keys when unset, leaving the ECS default in place", func() {
+				r := caller.Run(buildCreateVM(``))
+				Expect(r.GetError()).NotTo(HaveOccurred())
+
+				args := *mockContext.CreateInstanceArgs
+				Expect(args).NotTo(HaveKey("PrivatePoolOptions.MatchCriteria"))
+				Expect(args).NotTo(HaveKey("PrivatePoolOptions.Id"))
+			})
 		})
 	})
 })

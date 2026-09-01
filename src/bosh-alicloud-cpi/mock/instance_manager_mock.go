@@ -31,6 +31,8 @@ func (a InstanceManagerMock) GetInstance(cid string) (*ecs.Instance, error) {
 func (a InstanceManagerMock) CreateInstance(region string, args map[string]interface{}) (string, error) {
 	id, inst := a.mc.NewInstance()
 
+	*a.mc.CreateInstanceArgs = args
+
 	if v, ok := args["RegionId"]; ok {
 		inst.RegionId = v.(string)
 	}

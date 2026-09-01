@@ -65,6 +65,14 @@ type InstanceProps struct {
 	SpotPriceLimit       float64                        `json:"spot_price_limit"`
 	RamRoleName          string                         `json:"ram_role_name"`
 	StemcellId           string                         `json:"stemcell_id"`
+	PrivatePoolOptions   PrivatePoolOptions             `json:"private_pool_options"`
+}
+
+// Private pool capacity produced by an elasticity assurance or a capacity
+// reservation: https://help.aliyun.com/zh/ecs/developer-reference/api-ecs-2014-05-26-createinstance
+type PrivatePoolOptions struct {
+	MatchCriteria alicloud.PrivatePoolMatchCriteriaType `json:"match_criteria"`
+	Id            string                                `json:"id"`
 }
 
 type CreateVMMethod struct {
@@ -170,6 +178,11 @@ func (a CreateVMMethod) createVM(
 		return apiv1.VMCID{}, nil, bosherr.WrapError(err, "invalid spot properties ")
 	}
 
+	// private pool props
+	if err := validatePrivatePoolProps(instProps); err != nil {
+		return apiv1.VMCID{}, nil, bosherr.WrapError(err, "invalid private pool properties ")
+	}
+
 	// config vm charge type
 	if instProps.ChargeType == "PrePaid" {
 		createInstanceRequest["InstanceChargeType"] = "PrePaid"
@@ -216,6 +229,15 @@ func (a CreateVMMethod) createVM(
 	createInstanceRequest["SpotStrategy"] = string(instProps.SpotStrategy)
 	createInstanceRequest["SpotPriceLimit"] = requests.NewFloat(instProps.SpotPriceLimit)
 	createInstanceRequest["RamRoleName"] = instProps.RamRoleName
+
+	// Leave the private pool keys out entirely when unset, so ECS applies its
+	// own default (None) and existing deployments keep their behaviour.
+	if instProps.PrivatePoolOptions.MatchCriteria != "" {
+		createInstanceRequest["PrivatePoolOptions.MatchCriteria"] = string(instProps.PrivatePoolOptions.MatchCriteria)
+		if id := strings.TrimSpace(instProps.PrivatePoolOptions.Id); id != "" {
+			createInstanceRequest["PrivatePoolOptions.Id"] = id
+		}
+	}
 
 	// fill disks
 	disks, err := NewDisksWithProps(instProps.SystemDisk, instProps.EphemeralDisk)
@@ -528,6 +550,39 @@ func validateSpotProps(p InstanceProps) error {
 
 	if limitPrice != 0 && strategy != string(alicloud.SpotWithPriceLimit) {
 		return fmt.Errorf("spot limit price only support 'SpotWithPriceLimit' strategy")
+	}
+	return nil
+}
+
+func validatePrivatePoolProps(p InstanceProps) error {
+	criteria := string(p.PrivatePoolOptions.MatchCriteria)
+	id := strings.TrimSpace(p.PrivatePoolOptions.Id)
+
+	if criteria == "" {
+		if id != "" {
+			return fmt.Errorf("private pool id requires match_criteria '%s'", alicloud.PrivatePoolTarget)
+		}
+		return nil
+	}
+
+	criteriaArr := []string{string(alicloud.PrivatePoolOpen), string(alicloud.PrivatePoolTarget), string(alicloud.PrivatePoolNone)}
+	if err := validAllowedStringValues(criteria, criteriaArr); err != nil {
+		return err
+	}
+
+	if criteria == string(alicloud.PrivatePoolTarget) {
+		if id == "" {
+			return fmt.Errorf("private pool id is required by match_criteria '%s'", alicloud.PrivatePoolTarget)
+		}
+	} else if id != "" {
+		return fmt.Errorf("private pool id only support '%s' match_criteria", alicloud.PrivatePoolTarget)
+	}
+
+	// ECS rejects a private pool on a spot instance with SpotNotSupported, so
+	// fail before the create call rather than after it.
+	if criteria != string(alicloud.PrivatePoolNone) &&
+		p.SpotStrategy != "" && p.SpotStrategy != alicloud.NoSpot {
+		return fmt.Errorf("match_criteria '%s' does not support the spot strategy '%s'", criteria, p.SpotStrategy)
 	}
 	return nil
 }
