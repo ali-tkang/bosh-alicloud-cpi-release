@@ -109,6 +109,47 @@ var _ = Describe("Invoker", func() {
 		})
 	})
 
+	Describe("the invoker CreateInstance runs under", func() {
+		It("claims the create errors that do clear on their own", func() {
+			invoker := newCreateInstanceInvoker()
+
+			By("a client token still being processed")
+			Expect(invoker.catcherFor(errors.New("LastTokenProcessing"))).NotTo(BeNil())
+			By("an idempotent create still being processed")
+			Expect(invoker.catcherFor(errors.New("IdempotentProcessing"))).NotTo(BeNil())
+			By("an address the previous instance has not released yet")
+			Expect(invoker.catcherFor(errors.New("InvalidPrivateIpAddress.Duplicated"))).NotTo(BeNil())
+			Expect(invoker.catcherFor(errors.New("InvalidIPAddress.AlreadyUsed"))).NotTo(BeNil())
+			By("the service being busy")
+			Expect(invoker.catcherFor(errors.New("ServiceUnavailable"))).NotTo(BeNil())
+		})
+
+		// A private pool request fails for reasons no amount of waiting fixes, and
+		// each must reach the operator as itself. Were any of them claimed here, a
+		// create_vm would sit in the retry loop for minutes and then report "over
+		// max retry" instead of the reason.
+		//
+		// The first four codes are the ones ECS actually returns: they were taken
+		// from CreateInstance with DryRun set, not from the documentation, so a
+		// rename on the ECS side shows up here as a stale test rather than as a
+		// retry loop in production. NoStock is the one case DryRun cannot produce,
+		// since it needs a pool that is genuinely exhausted.
+		It("leaves a private pool rejection to the caller", func() {
+			invoker := newCreateInstanceInvoker()
+
+			By("a pool id that does not exist")
+			Expect(invoker.catcherFor(errors.New("Invalid.PrivatePoolOptions.Id"))).To(BeNil())
+			By("Target asked for with no id")
+			Expect(invoker.catcherFor(errors.New("MissingParameter.PrivatePoolOptionsId"))).To(BeNil())
+			By("an id supplied with a criteria other than Target")
+			Expect(invoker.catcherFor(errors.New("Invalid.PrivatePoolOptionsId"))).To(BeNil())
+			By("a private pool asked for on a spot instance")
+			Expect(invoker.catcherFor(errors.New("SpotNotSupported"))).To(BeNil())
+			By("a Target pool that is out of stock")
+			Expect(invoker.catcherFor(errors.New("OperationDenied.NoStock"))).To(BeNil())
+		})
+	})
+
 	It("gives each invoker its own retry budget", func() {
 		// The catchers are package-level values, so a budget spent by one CPI
 		// call must not leak into the next. Spending it directly keeps this test

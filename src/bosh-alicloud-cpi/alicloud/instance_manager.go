@@ -109,17 +109,28 @@ func (a InstanceManagerImpl) GetInstance(cid string) (inst *ecs.Instance, err er
 	return
 }
 
+// newCreateInstanceInvoker returns the retry policy CreateInstance runs under.
+//
+// It is a function rather than an inline list so a test can assert against the
+// same policy the call actually uses. What matters to a private pool request is
+// what this does not claim: a Target pool that is out of stock comes back as
+// OperationDenied.NoStock, and retrying that only delays the failure by minutes.
+func newCreateInstanceInvoker() Invoker {
+	invoker := NewInvoker()
+	invoker.AddCatcher(CreateInstanceCatcher_IdempotentProcessing)
+	invoker.AddCatcher(CreateInstanceCatcher_TokenProcessing)
+	invoker.AddCatcher(CreateInstanceCatcher_IpUsed)
+	invoker.AddCatcher(CreateInstanceCatcher_IpUsed2)
+	return invoker
+}
+
 func (a InstanceManagerImpl) CreateInstance(region string, queries map[string]interface{}) (string, error) {
 	conn, err := a.config.EcsTeaClient(region)
 	if err != nil {
 		return "", err
 	}
 
-	invoker := NewInvoker()
-	invoker.AddCatcher(CreateInstanceCatcher_IdempotentProcessing)
-	invoker.AddCatcher(CreateInstanceCatcher_TokenProcessing)
-	invoker.AddCatcher(CreateInstanceCatcher_IpUsed)
-	invoker.AddCatcher(CreateInstanceCatcher_IpUsed2)
+	invoker := newCreateInstanceInvoker()
 
 	action := "CreateInstance"
 	params := &openapi.Params{

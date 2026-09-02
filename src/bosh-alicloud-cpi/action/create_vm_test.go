@@ -378,6 +378,16 @@ var _ = Describe("create_vm", func() {
 	})
 
 	Context("private pool options", func() {
+		// The rules checked here mirror what ECS itself rejects, confirmed against
+		// CreateInstance with DryRun set: Target with no id comes back as
+		// MissingParameter.PrivatePoolOptionsId, an id under any other criteria as
+		// Invalid.PrivatePoolOptionsId, and a private pool on a spot instance as
+		// SpotNotSupported. Checking those locally saves a round trip.
+		//
+		// For a criteria outside the enum it saves more than a round trip: ECS
+		// answers UnknownError, which says nothing about which field is wrong. That
+		// is the reason to keep this validation rather than lean on ECS.
+
 		// validateFor runs the validation against a cloud_properties fragment, so it
 		// covers the json schema and the validation rules together.
 		validateFor := func(cloudProps string) error {
@@ -392,6 +402,13 @@ var _ = Describe("create_vm", func() {
 
 		It("accepts Target with an id", func() {
 			Expect(validateFor(`{"private_pool_options": {"match_criteria": "Target", "id": "eap-bp67acfmxazb4"}}`)).To(Succeed())
+		})
+
+		// A private pool id names either an elasticity assurance (eap-) or a
+		// capacity reservation (crp-). Both are private pools to ECS, so neither
+		// prefix is treated as more valid than the other here.
+		It("accepts Target with a capacity reservation id", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "Target", "id": "crp-bp67acfmxazb4"}}`)).To(Succeed())
 		})
 
 		It("accepts None", func() {
@@ -434,6 +451,29 @@ var _ = Describe("create_vm", func() {
 				"private_pool_options": {"match_criteria": "None"},
 				"spot_strategy": "SpotAsPriceGo"
 			}`)).To(Succeed())
+		})
+
+		It("rejects an id on None, which ignores it", func() {
+			Expect(validateFor(`{"private_pool_options": {"match_criteria": "None", "id": "eap-bp67acfmxazb4"}}`)).To(
+				MatchError(ContainSubstring("only support 'Target'")))
+		})
+
+		// An id of nothing but whitespace is an id the operator did not supply, and
+		// treating it as one would send ECS a blank Target and fail there instead of
+		// here. Both the check and the request mapping trim before deciding.
+		Describe("an id of only whitespace", func() {
+			It("does not satisfy Target", func() {
+				Expect(validateFor(`{"private_pool_options": {"match_criteria": "Target", "id": "   "}}`)).To(
+					MatchError(ContainSubstring("id is required")))
+			})
+
+			It("is not held against Open", func() {
+				Expect(validateFor(`{"private_pool_options": {"match_criteria": "Open", "id": "   "}}`)).To(Succeed())
+			})
+
+			It("does not on its own require a match_criteria", func() {
+				Expect(validateFor(`{"private_pool_options": {"id": "   "}}`)).To(Succeed())
+			})
 		})
 
 		Context("the query create_vm sends to ECS", func() {
@@ -487,6 +527,38 @@ var _ = Describe("create_vm", func() {
 				Expect(args).NotTo(HaveKey("PrivatePoolOptions.Id"))
 			})
 
+			It("carries a capacity reservation id", func() {
+				r := caller.Run(buildCreateVM(`,
+					"private_pool_options": {"match_criteria": "Target", "id": "crp-bp67acfmxazb4"}`))
+				Expect(r.GetError()).NotTo(HaveOccurred())
+
+				args := *mockContext.CreateInstanceArgs
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.MatchCriteria", "Target"))
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.Id", "crp-bp67acfmxazb4"))
+			})
+
+			// None is also what ECS falls back to on its own, but asking for it and
+			// saying nothing are different requests: an explicit None overrides a
+			// pool the account has set as its default.
+			It("sends None when None is what was asked for", func() {
+				r := caller.Run(buildCreateVM(`,
+					"private_pool_options": {"match_criteria": "None"}`))
+				Expect(r.GetError()).NotTo(HaveOccurred())
+
+				args := *mockContext.CreateInstanceArgs
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.MatchCriteria", "None"))
+				Expect(args).NotTo(HaveKey("PrivatePoolOptions.Id"))
+			})
+
+			It("trims the id, which ECS would otherwise reject", func() {
+				r := caller.Run(buildCreateVM(`,
+					"private_pool_options": {"match_criteria": "Target", "id": "  eap-bp67acfmxazb4  "}`))
+				Expect(r.GetError()).NotTo(HaveOccurred())
+
+				args := *mockContext.CreateInstanceArgs
+				Expect(args).To(HaveKeyWithValue("PrivatePoolOptions.Id", "eap-bp67acfmxazb4"))
+			})
+
 			It("omits both keys when unset, leaving the ECS default in place", func() {
 				r := caller.Run(buildCreateVM(``))
 				Expect(r.GetError()).NotTo(HaveOccurred())
@@ -494,6 +566,20 @@ var _ = Describe("create_vm", func() {
 				args := *mockContext.CreateInstanceArgs
 				Expect(args).NotTo(HaveKey("PrivatePoolOptions.MatchCriteria"))
 				Expect(args).NotTo(HaveKey("PrivatePoolOptions.Id"))
+			})
+
+			// The checks above call the validation directly, so none of them prove
+			// create_vm reaches it. This runs the whole method on properties ECS
+			// would reject and expects the create call never to happen.
+			It("does not reach ECS when the properties do not validate", func() {
+				*mockContext.CreateInstanceArgs = map[string]interface{}{}
+
+				r := caller.Run(buildCreateVM(`,
+					"private_pool_options": {"match_criteria": "Target"}`))
+
+				Expect(r.GetError()).To(HaveOccurred())
+				Expect(r.GetError().Error()).To(ContainSubstring("id is required"))
+				Expect(*mockContext.CreateInstanceArgs).To(BeEmpty())
 			})
 		})
 	})
